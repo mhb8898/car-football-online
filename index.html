@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Turbo Kickoff - Online Car Football</title>
+<meta name="description" content="Rocket-powered car football in the browser. Up to 4v4 online, peer-to-peer over WebRTC, no server, no install.">
+<meta name="theme-color" content="#070a18">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚽</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Russo+One&family=Rajdhani:wght@500;600;700&display=swap">
+<link rel="stylesheet" href="./style.css">
+<!-- PeerJS only brokers the WebRTC handshake; gameplay then flows peer-to-peer. -->
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/" } }</script>
+</head>
+<body>
+<div id="app">
+  <canvas id="game"></canvas>
+  <div id="plates"></div>
+
+  <!-- ============================ Main menu ============================ -->
+  <section id="menu" class="screen">
+    <div class="menu-col">
+      <h1 class="logo"><span>TURBO</span><b>KICKOFF</b></h1>
+      <p class="tag">Rocket cars. One giant ball. Up to 4v4, straight from your browser.</p>
+
+      <label class="field"><span>Your name</span><input id="nameIn" maxlength="14" autocomplete="off" spellcheck="false"></label>
+
+      <div class="carpick">
+        <button class="btn icon" id="carPrev" aria-label="Previous car">&#9664;</button>
+        <div class="carname"><b id="carName">Comet</b><small id="carBlurb"></small></div>
+        <button class="btn icon" id="carNext" aria-label="Next car">&#9654;</button>
+      </div>
+
+      <div class="menu-actions">
+        <button class="btn big primary" id="soloBtn">Play vs Bots</button>
+        <button class="btn big" id="hostBtn">Host Online Match</button>
+        <div class="join-row">
+          <input id="codeIn" maxlength="5" placeholder="CODE" autocomplete="off" spellcheck="false">
+          <button class="btn big" id="joinBtn">Join</button>
+        </div>
+      </div>
+      <p id="menuMsg" class="msg"></p>
+      <div class="menu-links">
+        <button class="link" id="controlsBtn">Controls</button>
+        <button class="link" id="settingsBtn">Settings</button>
+        <a class="link" href="https://github.com/mhb8898/car-football-online" target="_blank" rel="noopener">Source</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== Lobby ============================== -->
+  <section id="lobby" class="screen hidden">
+    <div class="panel lobby-panel">
+      <div class="lobby-head">
+        <div>
+          <h2 id="lobbyTitle">Lobby</h2>
+          <div id="roomRow" class="room-row hidden">
+            <span>Room</span><b id="roomCode">-----</b>
+            <button class="btn tiny" id="copyLink">Copy invite link</button>
+          </div>
+        </div>
+        <button class="btn" id="leaveLobby">Leave</button>
+      </div>
+      <div class="teams">
+        <div class="team blue"><h3>Blue</h3><ul id="teamBlue"></ul></div>
+        <div class="vs">VS</div>
+        <div class="team orange"><h3>Orange</h3><ul id="teamOrange"></ul></div>
+      </div>
+      <div class="lobby-controls">
+        <button class="btn" id="switchTeam">Switch team</button>
+      </div>
+      <div class="lobby-settings" id="lobbySettings">
+        <label>Team size
+          <select id="optSize"><option value="1">1v1</option><option value="2">2v2</option><option value="3" selected>3v3</option><option value="4">4v4</option></select>
+        </label>
+        <label>Bots
+          <select id="optLevel"><option value="-1">None</option><option value="0">Rookie</option><option value="1" selected>Pro</option><option value="2">All-Star</option></select>
+        </label>
+        <label>Length
+          <select id="optLength"><option value="120">2 min</option><option value="180">3 min</option><option value="300" selected>5 min</option></select>
+        </label>
+      </div>
+      <div class="lobby-foot">
+        <p id="lobbyMsg" class="msg"></p>
+        <button class="btn big primary" id="startBtn">Kick off</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- =============================== HUD =============================== -->
+  <div id="hud" class="hidden">
+    <div class="scorebar">
+      <div class="sc blue"><b id="scoreB">0</b></div>
+      <div class="clock"><b id="clock">5:00</b><small id="clockTag"></small></div>
+      <div class="sc orange"><b id="scoreO">0</b></div>
+    </div>
+    <div id="feed" class="feed"></div>
+    <div id="countdown" class="countdown hidden"></div>
+    <div id="banner" class="banner hidden"><b id="bannerTop">GOAL!</b><span id="bannerSub"></span></div>
+    <div id="respawn" class="respawn hidden">Demolished - respawning <b id="respawnT">3</b></div>
+    <div class="boost">
+      <svg viewBox="0 0 120 120">
+        <circle class="track" cx="60" cy="60" r="50"></circle>
+        <circle id="boostArc" class="arc" cx="60" cy="60" r="50"></circle>
+      </svg>
+      <div class="boost-num"><b id="boostNum">33</b><small>BOOST</small></div>
+    </div>
+    <div class="hud-hints">
+      <span id="camTag" class="chip">Ball cam</span>
+      <span id="netBadge" class="chip warn hidden"></span>
+    </div>
+    <div id="spectTag" class="spect hidden">Spectating</div>
+
+    <div id="touch" class="touch hidden">
+      <div class="stick"><div class="knob"></div></div>
+      <div class="tbtns">
+        <button data-btn="BOOST" class="tb boostb">BOOST</button>
+        <button data-btn="JUMP" class="tb jumpb">JUMP</button>
+        <button data-btn="DRIFT" class="tb small">SLIDE</button>
+        <button data-act="ballcam" class="tb small">CAM</button>
+        <button data-act="menu" class="tb small">II</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== Scoreboard (Tab) / End ====================== -->
+  <section id="scores" class="screen overlay hidden">
+    <div class="panel scores-panel">
+      <h2 id="scoresTitle">Scoreboard</h2>
+      <div id="scoresBody"></div>
+      <div id="endButtons" class="end-buttons hidden">
+        <button class="btn big primary" id="rematchBtn">Rematch</button>
+        <button class="btn big" id="toLobbyBtn">Back to lobby</button>
+        <button class="btn big" id="endLeaveBtn">Leave</button>
+      </div>
+      <p id="endMsg" class="msg"></p>
+    </div>
+  </section>
+
+  <!-- =============================== Pause ============================= -->
+  <section id="pause" class="screen overlay hidden">
+    <div class="panel pause-panel">
+      <h2>Paused</h2>
+      <p class="sub">The match keeps running - it's online.</p>
+      <button class="btn big primary" id="resumeBtn">Resume</button>
+      <button class="btn big" id="pauseSettings">Settings</button>
+      <button class="btn big" id="pauseControls">Controls</button>
+      <button class="btn big danger" id="quitBtn">Leave match</button>
+    </div>
+  </section>
+
+  <!-- ============================= Settings ============================ -->
+  <section id="settings" class="screen overlay hidden">
+    <div class="panel settings-panel">
+      <h2>Settings</h2>
+      <label class="row">Graphics
+        <select id="setQuality"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High (bloom)</option></select>
+      </label>
+      <label class="row">Field of view <input type="range" id="setFov" min="65" max="100" step="1"><output id="setFovOut"></output></label>
+      <label class="row">Camera distance <input type="range" id="setDist" min="6" max="13" step="0.2"><output id="setDistOut"></output></label>
+      <label class="row">Volume <input type="range" id="setVol" min="0" max="1" step="0.05"><output id="setVolOut"></output></label>
+      <label class="row check"><input type="checkbox" id="setBallCam"> Start matches in ball cam</label>
+      <label class="row check"><input type="checkbox" id="setPlates"> Show player names</label>
+      <button class="btn big primary" id="settingsDone">Done</button>
+    </div>
+  </section>
+
+  <!-- ============================= Controls ============================ -->
+  <section id="controls" class="screen overlay hidden">
+    <div class="panel controls-panel">
+      <h2>Controls</h2>
+      <div class="ctl-grid">
+        <div><h4>Keyboard</h4>
+          <dl>
+            <dt>W / S</dt><dd>Drive / reverse &middot; pitch in the air</dd>
+            <dt>A / D</dt><dd>Steer &middot; yaw in the air</dd>
+            <dt>Space</dt><dd>Jump &middot; again to double jump</dd>
+            <dt>Space + direction</dt><dd>Dodge (flip) into the ball</dd>
+            <dt>Shift / Left mouse</dt><dd>Boost</dd>
+            <dt>Ctrl / C</dt><dd>Powerslide &middot; air roll with A/D</dd>
+            <dt>Q / E</dt><dd>Air roll left / right</dd>
+            <dt>B</dt><dd>Toggle ball cam</dd>
+            <dt>Tab</dt><dd>Scoreboard</dd>
+            <dt>Esc</dt><dd>Menu</dd>
+          </dl>
+        </div>
+        <div><h4>Gamepad</h4>
+          <dl>
+            <dt>RT / LT</dt><dd>Drive / reverse</dd>
+            <dt>Left stick</dt><dd>Steer, pitch and yaw</dd>
+            <dt>A</dt><dd>Jump / dodge</dd>
+            <dt>B</dt><dd>Boost</dd>
+            <dt>X</dt><dd>Powerslide / air roll</dd>
+            <dt>LB / RB</dt><dd>Air roll</dd>
+            <dt>Y</dt><dd>Ball cam</dd>
+          </dl>
+          <h4>Tips</h4>
+          <p>Boost pads refill you: big orange orbs give 100, small ones 12. Hit an opponent at supersonic speed to demolish them. When the clock hits zero, the match ends once the ball touches the ground.</p>
+        </div>
+      </div>
+      <button class="btn big primary" id="controlsDone">Got it</button>
+    </div>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+  <div id="loading" class="loading"><div class="spin"></div></div>
+</div>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
