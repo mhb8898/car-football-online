@@ -42,7 +42,8 @@ export class PerfMeter {
   }
 
   /** Once per rendered frame, after it's done. */
-  frame(t, frameMs, drawMs, info) {
+  frame(t, frameMs, drawMs, info, pr = 1) {
+    this.pr = pr;
     this.frames++;
     this.worst = Math.max(this.worst, t - this.lastT);
     this.lastT = t;
@@ -65,6 +66,6 @@ export class PerfMeter {
       `cpu    <span class="${cls(cpu, 35, 70)}">${cpu.toFixed(0)}%</span> of a core\n` +
       `frame  ${(this.frameMs / this.frames).toFixed(2)} ms  (draw ${(this.drawMs / this.frames).toFixed(2)})\n` +
       `sim    ${(this.sim / Math.max(1, this.ticks)).toFixed(3)} ms/tick  ${((this.ticks * 1000) / span).toFixed(0)} Hz\n` +
-      `gpu    ${info.calls} calls  ${(info.triangles / 1000).toFixed(0)}k tris` + mem;
+      `gpu    ${info.calls} calls  ${(info.triangles / 1000).toFixed(0)}k tris  @${this.pr.toFixed(2)}x` + mem;
   }
 }

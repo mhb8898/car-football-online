@@ -73,6 +73,7 @@ class Game {
     this.renderer = new Renderer($('game'), this.cfg.quality);
     this.renderer.cam.fov = this.cfg.fov;
     this.renderer.cam.dist = this.cfg.dist;
+    this.renderer.autoRes = this.cfg.autoRes;
     this.perf = new PerfMeter($('perf'));
     this.perf.show(this.cfg.perf);
     this.input = new Input();
@@ -181,6 +182,7 @@ class Game {
     $('setBallCam').checked = c.ballCam;
     $('setPlates').checked = c.plates;
     $('setPerf').checked = c.perf;
+    $('setAutoRes').checked = c.autoRes;
     const out = () => {
       $('setFovOut').textContent = $('setFov').value;
       $('setDistOut').textContent = Number($('setDist').value).toFixed(1);
@@ -194,6 +196,11 @@ class Game {
     $('setBallCam').onchange = (e) => { this.cfg = settings.set({ ballCam: e.target.checked }); };
     $('setPlates').onchange = (e) => { this.cfg = settings.set({ plates: e.target.checked }); };
     $('setPerf').onchange = (e) => this.setPerf(e.target.checked);
+    $('setAutoRes').onchange = (e) => {
+      this.cfg = settings.set({ autoRes: e.target.checked });
+      this.renderer.autoRes = e.target.checked;
+      if (!e.target.checked) this.renderer.setPixelRatio(this.renderer.maxPr);
+    };
   }
 
   setPerf(on) {
@@ -807,7 +814,11 @@ class Game {
     this.renderFrame(t);
     // Ticks pumped from here are already counted as simulation.
     const ms = performance.now() - t0 - (this.perf.sim - sim0);
-    this.perf.frame(t, ms, this.drawMs, this.renderer.gl.info.render);
+    this.perf.frame(t, ms, this.drawMs, this.renderer.gl.info.render, this.renderer.res.pr);
+    const w = this.world || this.pred?.world;
+    this.renderer.calm = this.mode !== MODE.MATCH || !w || w.phase !== PHASE.PLAY;
+    if (this.lastRaf) this.renderer.adaptResolution(t - this.lastRaf);
+    this.lastRaf = t;
   }
 
   /** Time the renderer: the part of a frame that scales with graphics settings. */

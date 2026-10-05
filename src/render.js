@@ -286,6 +286,8 @@ export class Renderer {
     this.cam = { yaw: 0, pos: new THREE.Vector3(0, 12, 40), look: new THREE.Vector3(), ballCam: true, fov: 78, dist: 8.6, height: 3.3 };
     this.showroomT = 0;
 
+    this.autoRes = true;
+    this.calm = true;          // the game says when a hitch wouldn't be felt
     this.setQuality(quality);
     this.resize();
     window.addEventListener('resize', () => this.resize());
@@ -349,7 +351,9 @@ export class Renderer {
   setQuality(q) {
     this.quality = QUALITY[q] ? q : 'high';
     const Q = QUALITY[this.quality];
-    this.gl.setPixelRatio(Math.min(window.devicePixelRatio || 1, Q.pr));
+    this.maxPr = Math.min(window.devicePixelRatio || 1, Q.pr);
+    this.res = { pr: this.maxPr, frames: 0, slow: 0, t: 0, bad: 0, calm: 0, want: null, failedAt: 0, failedPr: Infinity, vsync: 1000 / 60 };
+    this.gl.setPixelRatio(this.maxPr);
     this.gl.shadowMap.enabled = Q.shadows;
     this.sun.castShadow = Q.shadows;
     if (Q.shadows) {
@@ -367,6 +371,87 @@ export class Renderer {
     }
     this.useBloom = Q.bloom;
     this.resize();
+    if (this.fx) this.warmup();
+  }
+
+  /**
+   * Auto resolution. The JS side of a frame is a couple of ms; what drops
+   * frames is the GPU (bloom and shadows at full Retina resolution). So
+   * watch the frame interval against the display's own and, when a fifth of
+   * frames in a second miss it, render fewer pixels; after a long clean run,
+   * try more again - but not back to a level that failed recently.
+   *
+   * A change is itself a hitch (the canvas and every bloom target are
+   * reallocated, 50-150 ms), so it waits for a moment the player won't
+   * feel it: `calm` is set by the game during kickoff countdowns, goal
+   * replays and menus. Only a GPU that's been behind for several seconds of
+   * live play gets its pixels cut there and then.
+   */
+  adaptResolution(gapMs) {
+    const R = this.res;
+    if (!this.autoRes || gapMs <= 0 || gapMs > 250) return;          // tab switch, not load
+    R.vsync = gapMs < R.vsync ? gapMs : R.vsync + (gapMs - R.vsync) * 0.002; // ~ the fastest frames
+    R.frames++;
+    if (gapMs > R.vsync * 1.45) R.slow++;
+    R.t += gapMs;
+    const now = performance.now();
+    if (R.t >= 1000) {
+      const ratio = R.slow / R.frames;
+      R.frames = R.slow = 0; R.t = 0;
+      if (ratio > 0.2) { R.bad++; R.calm = 0; } else { R.bad = 0; if (ratio < 0.03) R.calm++; else R.calm = 0; }
+      if (R.bad >= 2 && R.pr > 1) R.want = Math.max(1, R.pr - 0.25);
+      else if (R.calm >= 15 && R.pr < this.maxPr) {
+        const next = Math.min(this.maxPr, R.pr + 0.25);
+        if (!(next >= R.failedPr && now - R.failedAt < 120000)) R.want = next;
+        R.calm = 0;
+      }
+    }
+    if (R.want === null || R.want === R.pr) return;
+    const down = R.want < R.pr;
+    if (!this.calm && !(down && R.bad >= 6)) return;
+    if (down) { R.failedPr = R.pr; R.failedAt = now; }
+    this.setPixelRatio(R.want);
+    R.want = null; R.bad = 0; R.calm = 0;
+  }
+
+  setPixelRatio(pr) {
+    this.res.pr = pr;
+    this.gl.setPixelRatio(pr);
+    this.resize();
+  }
+
+  /**
+   * Compile every shader now, behind the menu, instead of on the frame where
+   * it's first needed: the other car types, the boost flame, particles, goal
+   * rings and the shadow pass's instanced variants. Left to the first frame
+   * that shows them, they freeze the game for up to a second at kickoff.
+   */
+  async warmup() {
+    const token = (this.warmToken = (this.warmToken || 0) + 1);
+    const probes = CAR_TYPES.map((t, i) => {
+      const v = this.makeCar(-1 - i, i % 2, i);
+      v.root.position.set(i * 4, -30, 0);           // under the floor
+      v.flame.visible = true;
+      return v;
+    });
+    this.fx.spawn(0, -30, 0, 0, 0, 0, 0.5, 0.1, new THREE.Color(0));
+    this.ring(0, -30, 0, 0xffffff, 1);
+    const done = () => { for (const v of probes) this.disposeCar(v); };
+    try {
+      if (this.gl.compileAsync) await this.gl.compileAsync(this.scene, this.camera);
+    } catch { /* compile on first use instead */ }
+    if (token !== this.warmToken) { done(); return; }
+    // One real frame through the same path, so the shadow pass and the
+    // composer's variants are built too.
+    probes.forEach((v, i) => this.placeCar(v, { type: i, team: i % 2 }));
+    this.flushCars();
+    this.present();
+    done();
+  }
+
+  present() {
+    if (this.useBloom && this.composer) this.composer.render(1 / 60);
+    else this.gl.render(this.scene, this.camera);
   }
 
   resize() {
@@ -451,6 +536,7 @@ export class Renderer {
         this.buildPadsFromAssets();
       }
     }
+    this.warmup();
   }
 
   // ----------------------------------------------------------------- cars
@@ -834,8 +920,7 @@ export class Renderer {
     this.fx.update(dt);
 
     this.updateCamera(view, dt);
-    if (this.useBloom && this.composer) this.composer.render(dt);
-    else this.gl.render(this.scene, this.camera);
+    this.present();
   }
 
   // --------------------------------------------------------------- camera

@@ -11,6 +11,7 @@ const DEFAULTS = {
   ballCam: true,
   plates: true,
   perf: false,
+  autoRes: true,
   muted: false,
 };
 let cur = { ...DEFAULTS };
