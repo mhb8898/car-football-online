@@ -18,7 +18,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { FIELD as F, BALL as B, TEAM_COLOR, CAR_TYPES, PADS } from './consts.js';
+import { FIELD as F, BALL as B, TEAM_COLOR, CAR_TYPES, PADS, MAX_TEAM } from './consts.js';
 
 const ASSETS = new URL('../assets/', import.meta.url);
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -112,8 +112,16 @@ class Particles {
       this.alpha[i] = Math.min(1, this.life[i] / this.maxLife[i] * 1.6);
     }
     this.n = n;
+    this.points.visible = n > 0;
+    if (n === 0) return;
+    // Upload only the live particles, not the whole 4000-slot pool.
     const g = this.points.geometry;
-    for (const k of ['position', 'color', 'size', 'alpha']) g.attributes[k].needsUpdate = true;
+    for (const k of ['position', 'color', 'size', 'alpha']) {
+      const a = g.attributes[k];
+      a.clearUpdateRanges();
+      a.addUpdateRange(0, n * a.itemSize);
+      a.needsUpdate = true;
+    }
     g.setDrawRange(0, n);
   }
 
@@ -195,7 +203,7 @@ function fallbackArena() {
   floor.name = 'field';
   g.add(floor);
   const wallMat = new THREE.MeshStandardMaterial({ color: 0x1b2233, roughness: 0.7 });
-  const glass = new THREE.MeshStandardMaterial({ color: 0x9fc4ff, transparent: true, opacity: 0.06, depthWrite: false, side: THREE.DoubleSide });
+  const glass = new THREE.MeshStandardMaterial({ color: 0x9fc4ff, transparent: true, opacity: 0.06, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true });
   const add = (w, h, d, x, y, z, m = wallMat) => { const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); b.position.set(x, y, z); g.add(b); return b; };
   add(2 * F.L, 3.5, 0.6, 0, 1.75, -F.W - 0.3); add(2 * F.L, 3.5, 0.6, 0, 1.75, F.W + 0.3);
   add(2 * F.L, F.H - 3.5, 0.1, 0, 3.5 + (F.H - 3.5) / 2, -F.W, glass); add(2 * F.L, F.H - 3.5, 0.1, 0, 3.5 + (F.H - 3.5) / 2, F.W, glass);
@@ -209,7 +217,7 @@ function fallbackArena() {
     for (const z of [-F.GW, F.GW]) { const p = new THREE.Mesh(post, gm); p.position.set(s * F.L, F.GH / 2, z); g.add(p); }
     const bar = new THREE.Mesh(new THREE.CylinderGeometry(F.POST_R, F.POST_R, 2 * F.GW, 10).rotateX(Math.PI / 2), gm);
     bar.position.set(s * F.L, F.GH, 0); g.add(bar);
-    const net = new THREE.MeshStandardMaterial({ color: 0xd0d8e8, transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthWrite: false });
+    const net = new THREE.MeshStandardMaterial({ color: 0xd0d8e8, transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthWrite: false, forceSinglePass: true });
     add(0.05, F.GH, 2 * F.GW, s * (F.L + F.GD), F.GH / 2, 0, net);
     add(F.GD, 0.05, 2 * F.GW, s * (F.L + F.GD / 2), F.GH, 0, net);
     add(F.GD, 0.05, 2 * F.GW, s * (F.L + F.GD / 2), 0.01, 0, wallMat);
@@ -226,6 +234,15 @@ export class Renderer {
     this.gl.toneMapping = THREE.ACESFilmicToneMapping;
     this.gl.toneMappingExposure = 1.05;
     this.gl.shadowMap.type = THREE.PCFSoftShadowMap;
+    // Counted per frame (bloom renders several passes), reset in draw().
+    this.gl.info.autoReset = false;
+    // Reused every frame instead of allocating: a 60-120 Hz loop that makes
+    // garbage pays for it in GC pauses.
+    this.scratch = {
+      q: new THREE.Quaternion(), q2: new THREE.Quaternion(), v: new THREE.Vector3(), v2: new THREE.Vector3(),
+      v3: new THREE.Vector3(), c: new THREE.Color(), c2: new THREE.Color(), m4: new THREE.Matrix4(), m4b: new THREE.Matrix4(),
+      e: new THREE.Euler(),
+    };
 
     this.scene = new THREE.Scene();
     this.scene.fog = new THREE.Fog(0x0a0f22, 120, 330);
@@ -246,7 +263,16 @@ export class Renderer {
     this.ballTemplate = fallbackBall();
     this.padTemplates = null;
 
-    this.cars = new Map();     // id -> visual
+    this.cars = new Map();     // id -> per-car visual state
+    this.carBatches = [];      // type -> instanced parts (see carBatch)
+    this.paint = new THREE.MeshPhysicalMaterial({
+      name: 'team_paint', color: 0xffffff, roughness: 0.4, metalness: 0.2, clearcoat: 0.6, clearcoatRoughness: 0.2, envMapIntensity: 0.6,
+    });
+    this.depthInstanced = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+    this.depthTinted = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+    this.flameGeo = new THREE.ConeGeometry(0.34, 1.9, 14, 1, true).rotateZ(Math.PI / 2).translate(-0.95, 0, 0);
+    this.flameCoreGeo = new THREE.ConeGeometry(0.18, 1.1, 10, 1, true).rotateZ(Math.PI / 2).translate(-0.55, 0, 0);
+    this.flameCoreMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false });
     this.ball = this.makeBall();
     this.pads = null;
     this.buildPadsFallback();
@@ -351,7 +377,10 @@ export class Renderer {
     if (this.composer) {
       this.composer.setPixelRatio(this.gl.getPixelRatio());
       this.composer.setSize(w, h);
-      this.bloom?.resolution.set(w / 2, h / 2);
+      // The composer sizes every pass in device pixels; bloom is a blur, and
+      // on a 2x screen that's 4x the fill for no visible gain. Size it in
+      // CSS pixels instead (its blur chain then starts at w/2 x h/2).
+      this.bloom?.setSize(w, h);
     }
     this.fx.mat.uniforms.scale.value = h * this.gl.getPixelRatio() / (2 * Math.tan((this.camera.fov * Math.PI) / 360));
   }
@@ -361,7 +390,15 @@ export class Renderer {
     const loader = new GLTFLoader();
     const load = (f) => loader.loadAsync(new URL(f, ASSETS).href).then((g) => g.scene).catch((e) => { console.warn('[assets]', f, e.message); return null; });
     const [cars, ball, pads, arena] = await Promise.all(['cars.glb', 'ball.glb', 'pads.glb', 'arena.glb'].map(load));
-    const shadowy = (root, cast, receive) => root.traverse((o) => { if (o.isMesh) { o.castShadow = cast; o.receiveShadow = receive; } });
+    // Only the big shapes cast: glass, trim, glow strips and rims add a draw
+    // call each to the shadow pass for a shadow nobody can see.
+    const small = /glow|glass|trim|accent|rim|seam/;
+    const shadowy = (root, cast, receive) => root.traverse((o) => {
+      if (!o.isMesh) return;
+      const names = (Array.isArray(o.material) ? o.material : [o.material]).map((m) => m.name).join(' ');
+      o.castShadow = cast && !small.test(names);
+      o.receiveShadow = receive;
+    });
 
     if (arena) {
       arena.traverse((o) => {
@@ -374,6 +411,12 @@ export class Renderer {
           for (const m of mats) if (m.map) { m.map.anisotropy = this.gl.capabilities.getMaxAnisotropy(); }
         }
       });
+      // A material shared by meshes that disagree on receiveShadow gets its
+      // shader state rebuilt at every switch - every frame. Settle each
+      // material on one answer: receive if any of its meshes should.
+      const recv = new Map();
+      arena.traverse((o) => { if (o.isMesh) recv.set(o.material, (recv.get(o.material) || false) || o.receiveShadow); });
+      arena.traverse((o) => { if (o.isMesh) o.receiveShadow = recv.get(o.material); });
       this.scene.remove(this.arena);
       this.arena = arena;
       this.scene.add(arena);
@@ -389,7 +432,8 @@ export class Renderer {
         shadowy(root, true, false);
         this.carTemplates[i] = root;
       });
-      for (const [id, v] of this.cars) { this.scene.remove(v.root); this.cars.delete(id); }
+      for (const [id, v] of this.cars) { this.disposeCar(v); this.cars.delete(id); }
+      this.disposeCarBatches();
     }
     if (ball) {
       const m = ball.getObjectByName('ball') || ball;
@@ -410,44 +454,94 @@ export class Renderer {
   }
 
   // ----------------------------------------------------------------- cars
-  makeCar(id, team, type) {
+  /**
+   * Cars are drawn instanced. For each car type, every distinct (geometry,
+   * material) in its model becomes one InstancedMesh that holds that part for
+   * every car of the type - so eight cars cost the draw calls of one, in the
+   * main pass and the shadow pass alike. Paint is one white material tinted
+   * per instance with the team colour; wheels get their own spin and steer
+   * through their instance matrices.
+   */
+  carBatch(type) {
+    if (this.carBatches[type]) return this.carBatches[type];
     const tpl = this.carTemplates[type] || this.carTemplates[0];
-    const model = tpl.clone(true);
-    const paint = new THREE.MeshPhysicalMaterial({
-      color: TEAM_COLOR[team], roughness: 0.4, metalness: 0.2, clearcoat: 0.6, clearcoatRoughness: 0.2, envMapIntensity: 0.6,
-    });
-    model.traverse((o) => {
+    tpl.updateMatrixWorld(true);
+    const inv = tpl.matrixWorld.clone().invert();
+    const rel = (o) => inv.clone().multiply(o.matrixWorld);
+    const wheels = ['wheel_fl', 'wheel_fr', 'wheel_rl', 'wheel_rr'].map((n) => tpl.getObjectByName(n)).filter(Boolean).map((w) => ({
+      obj: w, parent: rel(w.parent), pos: w.position.clone(), base: w.rotation.clone(), scale: w.scale.clone(),
+      inv: w.matrixWorld.clone().invert(), m: new THREE.Matrix4(),
+    }));
+    const wheelOf = (o) => {
+      for (let p = o; p && p !== tpl; p = p.parent) { const i = wheels.findIndex((w) => w.obj === p); if (i >= 0) return i; }
+      return -1;
+    };
+    const paint = (m) => (m.name === 'paint' ? this.paint : m);
+    const groups = new Map();
+    tpl.traverse((o) => {
       if (!o.isMesh) return;
-      if (Array.isArray(o.material)) o.material = o.material.map((m) => (m.name === 'paint' ? paint : m));
-      else if (o.material.name === 'paint') o.material = paint;
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      const key = o.geometry.uuid + '|' + mats.map((m) => m.uuid).join(',');
+      let g = groups.get(key);
+      if (!g) {
+        g = {
+          geometry: o.geometry, cast: o.castShadow, parts: [],
+          material: Array.isArray(o.material) ? o.material.map(paint) : paint(o.material),
+          painted: mats.some((m) => m.name === 'paint'),
+        };
+        groups.set(key, g);
+      }
+      const wi = wheelOf(o);
+      g.parts.push({ wheel: wi, local: wi >= 0 ? wheels[wi].inv.clone().multiply(o.matrixWorld) : rel(o) });
     });
-    const wheels = ['wheel_fl', 'wheel_fr', 'wheel_rl', 'wheel_rr'].map((n) => model.getObjectByName(n)).filter(Boolean);
+    const cap = 2 * MAX_TEAM + 1;              // a full 4v4, or the showroom car
+    const white = new THREE.Color(1, 1, 1);
+    for (const g of groups.values()) {
+      const im = new THREE.InstancedMesh(g.geometry, g.material, cap * g.parts.length);
+      if (g.painted) for (let i = 0; i < cap * g.parts.length; i++) im.setColorAt(i, white);
+      im.count = 0;
+      im.frustumCulled = false;                // spread over the pitch; one draw either way
+      im.castShadow = g.cast;
+      // The shadow pass shares one depth material between every caster, and
+      // a shader can't be both instanced and not, or tinted and not: each
+      // switch rebuilds its state. Instanced casters get their own.
+      im.customDepthMaterial = g.painted ? this.depthTinted : this.depthInstanced;
+      this.scene.add(im);
+      g.im = im;
+    }
     let radius = 0.45;
     if (wheels[0]) {
-      const bb = new THREE.Box3().setFromObject(wheels[0]);
+      const bb = new THREE.Box3().setFromObject(wheels[0].obj);
       radius = Math.max(0.2, (bb.max.y - bb.min.y) / 2);
     }
-    for (const w of wheels) w.userData.base = w.rotation.clone();
-    const exhaust = model.getObjectByName('exhaust');
-    const flame = new THREE.Mesh(
-      new THREE.ConeGeometry(0.34, 1.9, 14, 1, true).rotateZ(Math.PI / 2).translate(-0.95, 0, 0),
-      new THREE.MeshBasicMaterial({ color: 0xffb040, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }),
-    );
-    const core = new THREE.Mesh(
-      new THREE.ConeGeometry(0.18, 1.1, 10, 1, true).rotateZ(Math.PI / 2).translate(-0.55, 0, 0),
-      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false }),
-    );
-    flame.add(core);
-    flame.visible = false;
-    (exhaust || model).add(flame);
-    if (!exhaust) flame.position.set(-1.8, -0.2, 0);
+    const ex = tpl.getObjectByName('exhaust');
+    const exhaust = ex ? rel(ex) : new THREE.Matrix4().makeTranslation(-1.8, -0.2, 0);
+    const b = { groups: [...groups.values()], wheels, radius, exhaust, n: 0 };
+    this.carBatches[type] = b;
+    return b;
+  }
 
+  disposeCarBatches() {
+    for (const b of this.carBatches) if (b) for (const g of b.groups) { this.scene.remove(g.im); g.im.dispose(); }
+    this.carBatches = [];
+  }
+
+  /** Per-car state the instances don't hold: smoothing, wheel spin, the boost flame. */
+  makeCar(id, team, type) {
+    const batch = this.carBatch(type);
+    const exhaust = new THREE.Object3D();
+    exhaust.matrixAutoUpdate = false;
+    exhaust.matrix.copy(batch.exhaust);
+    const flame = new THREE.Mesh(this.flameGeo, new THREE.MeshBasicMaterial({ color: 0xffb040, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }));
+    flame.add(new THREE.Mesh(this.flameCoreGeo, this.flameCoreMat));
+    flame.visible = false;
+    exhaust.add(flame);
     const root = new THREE.Group();
-    root.add(model);
+    root.add(exhaust);
     this.scene.add(root);
     return {
-      id, team, type, root, model, wheels, radius, flame, exhaust: exhaust || flame,
-      q: new THREE.Quaternion(), spin: 0, steer: 0, visible: true, trailT: 0,
+      id, team, type, root, flame, exhaust, radius: batch.radius,
+      q: new THREE.Quaternion(), spin: 0, steer: 0, trailT: 0,
     };
   }
 
@@ -462,7 +556,40 @@ export class Renderer {
     for (const [id, v] of this.cars) if (!seen.has(id)) { this.disposeCar(v); this.cars.delete(id); }
   }
 
-  disposeCar(v) { this.scene.remove(v.root); }
+  disposeCar(v) { this.scene.remove(v.root); v.flame.material.dispose(); }
+
+  /** Write one car's parts into its type's instance buffers. */
+  placeCar(v, c) {
+    const b = this.carBatch(c.type), S = this.scratch;
+    const k = b.n++;
+    const car = S.m4.compose(v.root.position, v.q, S.v3.set(1, 1, 1));
+    b.wheels.forEach((w, i) => {
+      S.e.set(w.base.x, w.base.y + (i < 2 ? v.steer : 0), w.base.z + v.spin, w.base.order);
+      w.m.compose(w.pos, S.q2.setFromEuler(S.e), w.scale).premultiply(w.parent).premultiply(car);
+    });
+    const tint = S.c.set(TEAM_COLOR[c.team]);
+    for (const g of b.groups) {
+      const n = g.parts.length;
+      for (let j = 0; j < n; j++) {
+        const p = g.parts[j];
+        g.im.setMatrixAt(k * n + j, S.m4b.multiplyMatrices(p.wheel >= 0 ? b.wheels[p.wheel].m : car, p.local));
+        if (g.painted) g.im.setColorAt(k * n + j, tint);
+      }
+    }
+  }
+
+  /** Close out the frame's instance buffers: how many of each to draw. */
+  flushCars() {
+    for (const b of this.carBatches) {
+      if (!b) continue;
+      for (const g of b.groups) {
+        g.im.count = b.n * g.parts.length;
+        g.im.instanceMatrix.needsUpdate = true;
+        if (g.im.instanceColor) g.im.instanceColor.needsUpdate = true;
+      }
+      b.n = 0;
+    }
+  }
 
   // ----------------------------------------------------------------- ball
   makeBall() {
@@ -475,40 +602,76 @@ export class Renderer {
 
   // ----------------------------------------------------------------- pads
   buildPadsFallback() {
-    this.padVis = [];
-    const g = new THREE.Group();
-    this.scene.add(g);
-    this.padGroup = g;
     const base = new THREE.MeshStandardMaterial({ color: 0x2a2f3a, metalness: 0.6, roughness: 0.4 });
     const glow = new THREE.MeshStandardMaterial({ color: 0xffb020, emissive: 0xffa010, emissiveIntensity: 3 });
-    {
-      for (const p of PADS) {
-        const r = p.big ? 1.6 : 0.9;
-        const b = new THREE.Mesh(new THREE.CylinderGeometry(r, r * 1.1, 0.12, 20), base);
-        b.position.set(p.x, 0.06, p.z);
-        const o = new THREE.Mesh(p.big ? new THREE.SphereGeometry(0.6, 16, 12) : new THREE.CylinderGeometry(0.45, 0.45, 0.12, 16), glow);
-        o.position.set(p.x, p.big ? 1.1 : 0.25, p.z);
-        g.add(b, o);
-        this.padVis.push({ orb: o, big: p.big, x: p.x, z: p.z, active: true });
-      }
-    }
+    const tpl = (big) => {
+      const g = new THREE.Group();
+      const r = big ? 1.6 : 0.9;
+      const b = new THREE.Mesh(new THREE.CylinderGeometry(r, r * 1.1, 0.12, 20), base);
+      b.position.y = 0.06;
+      const o = new THREE.Mesh(big ? new THREE.SphereGeometry(0.6, 16, 12) : new THREE.CylinderGeometry(0.45, 0.45, 0.12, 16), glow);
+      o.name = big ? 'pad_big_orb' : 'pad_small_orb';
+      o.position.y = big ? 1.1 : 0.25;
+      g.add(b, o);
+      return g;
+    };
+    this.buildPads({ big: tpl(true), small: tpl(false) });
   }
 
-  buildPadsFromAssets() {
-    {
-      this.scene.remove(this.padGroup);
-      const g = new THREE.Group();
-      this.padVis = [];
-      for (const p of PADS) {
-        const tpl = p.big ? this.padTemplates.big : this.padTemplates.small;
-        const inst = tpl.clone(true);
-        inst.position.set(p.x, 0, p.z);
-        const orb = inst.getObjectByName(p.big ? 'pad_big_orb' : 'pad_small_orb');
-        g.add(inst);
-        this.padVis.push({ orb, big: p.big, x: p.x, z: p.z, active: true, baseY: orb ? orb.position.y : 0 });
-      }
-      this.padGroup = g;
-      this.scene.add(g);
+  buildPadsFromAssets() { this.buildPads(this.padTemplates); }
+
+  /**
+   * Every pad of a kind is the same model, so each of the model's meshes is
+   * drawn once for all of them (an InstancedMesh) - 28 pads in a handful of
+   * draw calls rather than ~110. A collected orb is hidden by scaling its
+   * instance to nothing; the big orbs bob and turn, the small ones only
+   * change when they're taken or come back.
+   */
+  buildPads(templates) {
+    if (this.padGroup) this.scene.remove(this.padGroup);
+    const g = new THREE.Group();
+    const m = new THREE.Matrix4();
+    this.padOrbs = [];
+    this.padShown = PADS.map(() => null);
+    for (const big of [true, false]) {
+      const tpl = big ? templates.big : templates.small;
+      const list = PADS.map((p, i) => i).filter((i) => PADS[i].big === big);
+      tpl.updateMatrixWorld(true);
+      const inv = tpl.matrixWorld.clone().invert();
+      tpl.traverse((o) => {
+        if (!o.isMesh) return;
+        const local = inv.clone().multiply(o.matrixWorld);
+        const im = new THREE.InstancedMesh(o.geometry, o.material, list.length);
+        list.forEach((pi, k) => im.setMatrixAt(k, m.makeTranslation(PADS[pi].x, 0, PADS[pi].z).multiply(local)));
+        im.computeBoundingSphere();
+        im.receiveShadow = !/_orb/.test(o.name);
+        g.add(im);
+        if (/_orb$/.test(o.name) || /_orb$/.test(o.parent?.name || '')) this.padOrbs.push({ im, local, list, big });
+      });
+    }
+    this.padGroup = g;
+    this.scene.add(g);
+  }
+
+  updatePads(on) {
+    const t = performance.now() / 1000;
+    const m = this.scratch.m4, r = this.scratch.m4b;
+    // Small pads: only touch the buffer when one changes.
+    let changed = false;
+    for (let i = 0; i < PADS.length; i++) {
+      const v = !!on[i];
+      if (this.padShown[i] !== v) { this.padShown[i] = v; changed = true; }
+    }
+    for (const o of this.padOrbs) {
+      if (!o.big && !changed) continue;
+      o.list.forEach((pi, k) => {
+        const p = PADS[pi];
+        if (!this.padShown[pi]) m.makeScale(0, 0, 0);
+        else if (o.big) m.makeTranslation(p.x, Math.sin(t * 2 + pi) * 0.12, p.z).multiply(r.makeRotationY(t)).multiply(o.local);
+        else m.makeTranslation(p.x, 0, p.z).multiply(o.local);
+        o.im.setMatrixAt(k, m);
+      });
+      o.im.instanceMatrix.needsUpdate = true;
     }
   }
 
@@ -594,6 +757,8 @@ export class Renderer {
    */
   draw(view, dt) {
     dt = Math.min(dt, 0.1);
+    this.gl.info.reset();
+    const S = this.scratch;
     this.syncCars(view.cars);
 
     for (const c of view.cars) {
@@ -602,17 +767,14 @@ export class Renderer {
       if (c.demo) continue;
       v.root.position.set(c.x, c.y, c.z);
       // Orientation glides toward the simulated one; the sim snaps on landing.
-      const tq = new THREE.Quaternion(c.qx, c.qy, c.qz, c.qw);
+      const tq = S.q.set(c.qx, c.qy, c.qz, c.qw);
       v.q.slerp(tq, 1 - Math.exp(-dt * 22));
       v.root.quaternion.copy(v.q);
-      const fwd = new THREE.Vector3(1, 0, 0).applyQuaternion(tq);
+      const fwd = S.v.set(1, 0, 0).applyQuaternion(tq);
       const fs = c.vx * fwd.x + c.vy * fwd.y + c.vz * fwd.z;
       v.spin -= (c.grounded ? fs : fs * 0.3) / v.radius * dt;
       v.steer = damp(v.steer, -c.s * 0.5, 12, dt);
-      v.wheels.forEach((w, i) => {
-        const b = w.userData.base;
-        w.rotation.set(b.x, b.y + (i < 2 ? v.steer : 0), b.z + v.spin);
-      });
+      this.placeCar(v, c);
       // Boost flame and trail.
       v.flame.visible = c.boosting;
       if (c.boosting) {
@@ -620,10 +782,9 @@ export class Renderer {
         v.flame.scale.set(f * (c.supersonic ? 1.35 : 1), 1, 1);
         v.flame.material.color.set(c.supersonic ? 0xfff0c0 : 0xffa030);
         v.trailT += dt;
-        const ep = new THREE.Vector3();
-        v.exhaust.getWorldPosition(ep);
-        const back = fwd.clone().multiplyScalar(-6);
-        const tc = new THREE.Color(c.supersonic ? 0xfff2d0 : TEAM_COLOR[c.team]).lerp(new THREE.Color(0xffa040), c.supersonic ? 0.2 : 0.5);
+        const ep = v.exhaust.getWorldPosition(S.v2);
+        const back = S.v3.copy(fwd).multiplyScalar(-6);
+        const tc = S.c.set(c.supersonic ? 0xfff2d0 : TEAM_COLOR[c.team]).lerp(S.c2.set(0xffa040), c.supersonic ? 0.2 : 0.5);
         for (let i = 0; i < 2; i++) {
           this.fx.spawn(ep.x + (Math.random() - 0.5) * 0.3, ep.y + (Math.random() - 0.5) * 0.3, ep.z + (Math.random() - 0.5) * 0.3,
             back.x + c.vx * 0.2, back.y + c.vy * 0.2 + Math.random(), back.z + c.vz * 0.2, 0.35 + Math.random() * 0.25, 0.55, tc, { grow: 1.8, drag: 2 });
@@ -631,16 +792,17 @@ export class Renderer {
       }
     }
 
-    // Ball: roll it from its velocity - spin isn't simulated, only seen.
+    this.flushCars();
+
+    // Ball: turn it by its simulated spin (world-frame angular velocity).
     const b = view.ball;
     this.ball.root.visible = b.live;
     this.ballRing.visible = b.live;
     if (b.live) {
       this.ball.root.position.set(b.x, b.y, b.z);
-      const sp = Math.hypot(b.vx, b.vz);
-      if (sp > 0.05) {
-        const axis = new THREE.Vector3(b.vz, 0, -b.vx).normalize();
-        this.ball.q.premultiply(new THREE.Quaternion().setFromAxisAngle(axis, (sp / B.R) * dt));
+      const w = Math.hypot(b.wx || 0, b.wy || 0, b.wz || 0);
+      if (w > 1e-3) {
+        this.ball.q.premultiply(S.q2.setFromAxisAngle(S.v.set(b.wx / w, b.wy / w, b.wz / w), w * dt)).normalize();
         this.ball.root.quaternion.copy(this.ball.q);
       }
       const h = b.y - B.R;
@@ -650,21 +812,12 @@ export class Renderer {
       this.ballRing.material.opacity = clamp(0.55 - h * 0.025, 0.12, 0.55);
       const speed = Math.hypot(b.vx, b.vy, b.vz);
       if (speed > 30) {
-        const tc = new THREE.Color(0x9fe8ff);
+        const tc = S.c.set(0x9fe8ff);
         this.fx.spawn(b.x, b.y, b.z, 0, 0, 0, 0.35, 2.2 * (speed - 30) / 25 + 0.5, tc, { grow: -3 });
       }
     }
 
-    // Pads.
-    if (this.padVis && view.pads) {
-      const t = performance.now() / 1000;
-      this.padVis.forEach((p, i) => {
-        const on = !!view.pads[i];
-        if (!p.orb) return;
-        p.orb.visible = on;
-        if (on && p.big) { p.orb.position.y = (p.baseY || 1.1) + Math.sin(t * 2 + i) * 0.12; p.orb.rotation.y = t; }
-      });
-    }
+    if (view.pads) this.updatePads(view.pads);
 
     // Rings and flashes.
     for (let i = this.rings.length - 1; i >= 0; i--) {
@@ -690,8 +843,12 @@ export class Renderer {
     const cam = this.cam;
     const me = view.cars.find((c) => c.id === view.myId);
     const b = view.ball;
-    const desired = new THREE.Vector3();
-    const look = new THREE.Vector3();
+    const K = this.camScratch || (this.camScratch = {
+      desired: new THREE.Vector3(), look: new THREE.Vector3(), car: new THREE.Vector3(), q: new THREE.Quaternion(),
+      f: new THREE.Vector3(), dir: new THREE.Vector3(),
+    });
+    const desired = K.desired.set(0, 0, 0);
+    const look = K.look.set(0, 0, 0);
 
     if (view.showroom) {
       // Menu backdrop: slow orbit of a car parked at centre field.
@@ -702,9 +859,8 @@ export class Renderer {
       cam.pos.lerp(desired, 1 - Math.exp(-dt * 3));
       cam.look.lerp(look, 1 - Math.exp(-dt * 3));
     } else if (me && !me.demo) {
-      const carPos = new THREE.Vector3(me.x, me.y, me.z);
-      const q = new THREE.Quaternion(me.qx, me.qy, me.qz, me.qw);
-      const f = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+      const carPos = K.car.set(me.x, me.y, me.z);
+      const f = K.f.set(1, 0, 0).applyQuaternion(K.q.set(me.qx, me.qy, me.qz, me.qw));
       // Car cam follows the heading (or the direction of travel in the air);
       // ball cam swings round to keep the ball dead ahead.
       let yaw;
@@ -712,19 +868,21 @@ export class Renderer {
       else if (me.grounded || Math.hypot(f.x, f.z) > 0.3) yaw = Math.atan2(-f.z, f.x);
       else yaw = Math.atan2(-me.vz, me.vx);
       cam.yaw = dampAngle(cam.yaw, yaw, cam.ballCam ? 7 : 5, dt);
-      const dir = new THREE.Vector3(Math.cos(cam.yaw), 0, -Math.sin(cam.yaw));
-      desired.copy(carPos).addScaledVector(dir, -cam.dist).add(new THREE.Vector3(0, cam.height, 0));
+      const dir = K.dir.set(Math.cos(cam.yaw), 0, -Math.sin(cam.yaw));
+      desired.copy(carPos).addScaledVector(dir, -cam.dist);
+      desired.y += cam.height;
       if (cam.ballCam && b.live) {
-        const toBall = new THREE.Vector3(b.x - me.x, b.y - me.y, b.z - me.z);
-        const hd = Math.hypot(toBall.x, toBall.z);
+        const hd = Math.hypot(b.x - me.x, b.z - me.z);
         // Raise the camera for a high ball so it stays in frame.
         desired.y += clamp((b.y - me.y) / Math.max(hd, 4) * 2.2, -1, 4);
         // Aim along the car->ball line but only a few metres out, so the car
         // stays low and centred in frame and the ball sits above it.
         const up = clamp((b.y - me.y) / Math.max(hd, 3), -0.3, 1.4);
-        look.copy(carPos).addScaledVector(dir, 6).add(new THREE.Vector3(0, 1.4 + up * 4, 0));
+        look.copy(carPos).addScaledVector(dir, 6);
+        look.y += 1.4 + up * 4;
       } else {
-        look.copy(carPos).addScaledVector(dir, 4).add(new THREE.Vector3(0, 1.3, 0));
+        look.copy(carPos).addScaledVector(dir, 4);
+        look.y += 1.3;
       }
       cam.pos.lerp(desired, 1 - Math.exp(-dt * 11));
       cam.look.lerp(look, 1 - Math.exp(-dt * 14));
@@ -763,7 +921,7 @@ export class Renderer {
 
   /** Screen position of a world point, for DOM overlays. null if behind us. */
   project(x, y, z) {
-    const v = new THREE.Vector3(x, y, z).project(this.camera);
+    const v = this.scratch.v3.set(x, y, z).project(this.camera);
     if (v.z > 1) return null;
     return { x: (v.x * 0.5 + 0.5) * window.innerWidth, y: (-v.y * 0.5 + 0.5) * window.innerHeight, behind: false };
   }
@@ -780,10 +938,14 @@ function prepMaterial(m, kind) {
     // tone-mapped real-time scene they blow out every edge into white haze.
     m.emissiveIntensity = Math.min(m.emissiveIntensity || 1, kind === 'arena' ? 1.1 : 1.6);
   }
+  // Thin see-through panes: drawing back faces then front faces (Three's
+  // default for transparent double-sided) costs a shader rebuild per mesh per
+  // pass, for a sort order nobody could see.
   if (kind === 'arena' && n.startsWith('glass')) {
-    m.transparent = true; m.opacity = 0.05; m.depthWrite = false; m.side = THREE.DoubleSide;
+    m.transparent = true; m.opacity = 0.05; m.depthWrite = false; m.side = THREE.DoubleSide; m.forceSinglePass = true;
     m.color.set(0x6f8fc8); m.metalness = 0; m.roughness = 0.2; m.envMapIntensity = 0.15;
   }
-  if (n.startsWith('net')) { m.transparent = true; m.opacity = 0.55; m.depthWrite = false; m.side = THREE.DoubleSide; }
+  if (n.startsWith('net')) { m.transparent = true; m.opacity = 0.55; m.depthWrite = false; m.side = THREE.DoubleSide; m.forceSinglePass = true; }
   if (kind === 'arena' && n === 'field') { m.roughness = 0.92; m.metalness = 0; }
+  if (m.transparent && m.side === THREE.DoubleSide) m.forceSinglePass = true;
 }

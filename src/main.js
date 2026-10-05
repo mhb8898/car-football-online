@@ -23,6 +23,7 @@ import { Host, Client, makeRoomCode, makeToken, b64ToBytes } from './net.js';
 import { Renderer } from './render.js';
 import { Input } from './input.js';
 import * as audio from './audio.js';
+import { PerfMeter } from './perf.js';
 import * as settings from './settings.js';
 import * as ui from './ui.js';
 import { $ } from './ui.js';
@@ -72,6 +73,8 @@ class Game {
     this.renderer = new Renderer($('game'), this.cfg.quality);
     this.renderer.cam.fov = this.cfg.fov;
     this.renderer.cam.dist = this.cfg.dist;
+    this.perf = new PerfMeter($('perf'));
+    this.perf.show(this.cfg.perf);
     this.input = new Input();
     this.input.onAction = (a) => this.onAction(a);
     if (settings.isTouch) this.input.bindTouch($('touch'));
@@ -177,6 +180,7 @@ class Game {
     $('setVol').value = c.volume;
     $('setBallCam').checked = c.ballCam;
     $('setPlates').checked = c.plates;
+    $('setPerf').checked = c.perf;
     const out = () => {
       $('setFovOut').textContent = $('setFov').value;
       $('setDistOut').textContent = Number($('setDist').value).toFixed(1);
@@ -189,6 +193,13 @@ class Game {
     $('setVol').oninput = (e) => { this.cfg = settings.set({ volume: +e.target.value }); audio.setVolume(+e.target.value); out(); };
     $('setBallCam').onchange = (e) => { this.cfg = settings.set({ ballCam: e.target.checked }); };
     $('setPlates').onchange = (e) => { this.cfg = settings.set({ plates: e.target.checked }); };
+    $('setPerf').onchange = (e) => this.setPerf(e.target.checked);
+  }
+
+  setPerf(on) {
+    this.cfg = settings.set({ perf: on });
+    $('setPerf').checked = on;
+    this.perf.show(on);
   }
 
   playerName() {
@@ -222,6 +233,8 @@ class Game {
       this.renderer.cam.ballCam = !this.renderer.cam.ballCam;
     } else if (a === 'scores' && this.mode === MODE.MATCH && !this.ended) {
       this.showScores(!ui.isShown('scores'));
+    } else if (a === 'perf') {
+      this.setPerf(!this.cfg.perf);
     } else if (a === 'mute') {
       this.cfg = settings.set({ muted: !this.cfg.muted });
       audio.setMuted(this.cfg.muted);
@@ -562,7 +575,10 @@ class Game {
   }
 
   onClientState(bytes) {
-    if (!this.pred) return;
+    if (this.pred) this.perf.simulate(() => this.applySnapshot(bytes));
+  }
+
+  applySnapshot(bytes) {
     const s = decodeSnapshot(bytes);
     if (!s) return;
     const w = this.pred.world;
@@ -643,9 +659,9 @@ class Game {
     this.lastT = now;
     while (this.acc >= TICK_MS) {
       this.acc -= TICK_MS;
-      if (this.mode === MODE.MATCH) {
-        if (this.world) this.hostTick();
-        else if (this.pred) this.clientTick();
+      if (this.mode === MODE.MATCH && (this.world || this.pred)) {
+        this.perf.simulate(() => (this.world ? this.hostTick() : this.clientTick()));
+        this.perf.ticks++;
       }
     }
   }
@@ -786,6 +802,22 @@ class Game {
   // ================================================================ render
   frame(t) {
     requestAnimationFrame((x) => this.frame(x));
+    const t0 = performance.now(), sim0 = this.perf.sim;
+    this.drawMs = 0;
+    this.renderFrame(t);
+    // Ticks pumped from here are already counted as simulation.
+    const ms = performance.now() - t0 - (this.perf.sim - sim0);
+    this.perf.frame(t, ms, this.drawMs, this.renderer.gl.info.render);
+  }
+
+  /** Time the renderer: the part of a frame that scales with graphics settings. */
+  draw(view, dt) {
+    const t = performance.now();
+    this.renderer.draw(view, dt);
+    this.drawMs += performance.now() - t;
+  }
+
+  renderFrame(t) {
     this.pump();
     const dt = Math.min(0.1, (t - (this.lastFrame || t)) / 1000);
     this.lastFrame = t;
@@ -793,14 +825,14 @@ class Game {
 
     const w = this.world || this.pred?.world;
     if (this.mode !== MODE.MATCH || !w || (this.pred && !this.pred.ready)) {
-      this.renderer.draw(this.showroomView(), dt);
+      this.draw(this.showroomView(), dt);
       audio.engineUpdate(null);
       if (this.mode === MODE.MATCH) ui.hud({ score: [0, 0], clock: 0, boost: 0, ballCam: this.renderer.cam.ballCam, respawn: 0 });
       return;
     }
     const alpha = Math.min(1, this.acc / TICK_MS);
     const view = this.buildView(w, alpha);
-    this.renderer.draw(view, dt);
+    this.draw(view, dt);
 
     const me = w.car(this.myCar);
     audio.engineUpdate(me && !me.demo ? Math.hypot(me.vx, me.vy, me.vz) : null, me && (me.inp.b & BTN.BOOST) && me.boost > 0, me?.grounded);
@@ -874,7 +906,7 @@ class Game {
     const bp = pos('ball', w.ball);
     return {
       cars, myId: this.myCar,
-      ball: { ...bp, vx: w.ball.vx, vy: w.ball.vy, vz: w.ball.vz, live: w.ball.live },
+      ball: { ...bp, vx: w.ball.vx, vy: w.ball.vy, vz: w.ball.vz, wx: w.ball.wx, wy: w.ball.wy, wz: w.ball.wz, live: w.ball.live },
       pads: w.pads.map((p) => p.t <= 0),
     };
   }

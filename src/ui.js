@@ -137,12 +137,13 @@ export function nameplates(list) {
       root.appendChild(el);
       plates.set(p.id, el);
     }
-    el.className = 'plate t' + p.team;
+    // Moved with transform, not left/top, so it never triggers a layout.
+    const cls = 'plate t' + p.team, w = `${Math.round(p.boost)}%`, a = p.alpha.toFixed(2);
+    if (el.className !== cls) el.className = cls;
     if (el.firstChild.textContent !== p.name) el.firstChild.textContent = p.name;
-    el.lastChild.style.width = `${Math.round(p.boost)}%`;
-    el.style.left = `${p.x.toFixed(1)}px`;
-    el.style.top = `${p.y.toFixed(1)}px`;
-    el.style.opacity = p.alpha.toFixed(2);
+    if (el.lastChild.style.width !== w) el.lastChild.style.width = w;
+    if (el.style.opacity !== a) el.style.opacity = a;
+    el.style.transform = `translate3d(${p.x.toFixed(1)}px, ${p.y.toFixed(1)}px, 0) translate(-50%, -100%)`;
   }
   for (const [id, el] of plates) if (!seen.has(id)) { el.remove(); plates.delete(id); }
 }

@@ -19,6 +19,7 @@
 <div id="app">
   <canvas id="game"></canvas>
   <div id="plates"></div>
+  <pre id="perf" class="perf hidden"></pre>
 
   <!-- ============================ Main menu ============================ -->
   <section id="menu" class="screen">
@@ -164,6 +165,7 @@
       <label class="row">Volume <input type="range" id="setVol" min="0" max="1" step="0.05"><output id="setVolOut"></output></label>
       <label class="row check"><input type="checkbox" id="setBallCam"> Start matches in ball cam</label>
       <label class="row check"><input type="checkbox" id="setPlates"> Show player names</label>
+      <label class="row check"><input type="checkbox" id="setPerf"> Show FPS and CPU (F3)</label>
       <button class="btn big primary" id="settingsDone">Done</button>
     </div>
   </section>
@@ -179,11 +181,13 @@
             <dt>A / D</dt><dd>Steer &middot; yaw in the air</dd>
             <dt>Space</dt><dd>Jump &middot; again to double jump</dd>
             <dt>Space + direction</dt><dd>Dodge (flip) into the ball</dd>
+            <dt>Back flip, then W</dt><dd>Half flip: cancel the flip to turn around</dd>
             <dt>Shift / Left mouse</dt><dd>Boost</dd>
             <dt>Ctrl / C</dt><dd>Powerslide &middot; air roll with A/D</dd>
             <dt>Q / E</dt><dd>Air roll left / right</dd>
             <dt>B</dt><dd>Toggle ball cam</dd>
             <dt>Tab</dt><dd>Scoreboard</dd>
+            <dt>F3</dt><dd>FPS and CPU readout</dd>
             <dt>Esc</dt><dd>Menu</dd>
           </dl>
         </div>

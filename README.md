@@ -84,7 +84,17 @@ Same design as the sibling project:
 - **Driving**: throttle, brake, reverse, powerslide, and boost to
   supersonic (28 m/s).
 - **Jump, double jump and dodge.** Jump, then press jump again with a
-  direction to flip; a flip into the ball hits 35% harder.
+  direction to flip; a flip into the ball hits 35% harder. Pull the stick
+  against a flip to cancel it: a cancelled back flip is a **half flip**, the
+  fastest way to turn around.
+- **A ball that spins.** Friction at every contact trades travel for spin and
+  back, so a skidding ball starts to roll, backspin bites on the bounce, and a
+  glancing touch or a car driving out from under the ball puts spin on it.
+- **Hits like the game this echoes**: the punch scales with closing speed
+  (a gentle touch stays gentle, so the ball can sit on your roof), and the
+  bumper's corners angle the shot. When two cars meet the ball in the same
+  instant, both touches count against the same ball, so neither side wins
+  every 50/50 by list order.
 - **Air control**: pitch, yaw and air roll, with boost pushing along the
   nose, so aerials work.
 - **Boost pads**: 6 big (100) and 22 small (12), mirrored so no side is
@@ -103,7 +113,7 @@ Same design as the sibling project:
 
 **Controls** — `W/S` drive (pitch in the air), `A/D` steer (yaw), `Space`
 jump/dodge, `Shift` or left mouse boost, `Ctrl` powerslide/air roll, `Q/E` air
-roll, `B` ball cam, `Tab` scoreboard, `Esc` menu, `M` mute. Keys match by
+roll, `B` ball cam, `Tab` scoreboard, `Esc` menu, `M` mute, `F3` frame rate and CPU readout. Keys match by
 physical position, so WASD works on any keyboard layout. Gamepads use the
 standard mapping, and touch devices get a stick and buttons.
 
@@ -152,7 +162,15 @@ Useful tools:
 ```bash
 node tools/sim.mjs --size 3 --minutes 5 --runs 3   # bots vs bots, headless
 node tools/netsim.mjs --ms 120 --loss 0.1          # prediction error under bad networks
+node tools/bench.mjs --url http://localhost:8777/  # fps, CPU and draw calls in headless Chrome
 ```
+
+`tools/bench.mjs` starts a 4v4 bot match in a real headless Chrome and
+reports frames per second (uncapped by default, so it measures what the
+machine *could* draw; `--capped` measures at vsync), the main thread's CPU
+share, JS time per frame and draw calls. `--quality low|medium|high`,
+`--size 1-4` and `--profile` (prints the hottest functions) help find where
+time goes. In the game itself, `F3` shows the same live.
 
 To test multiplayer on one machine, open two tabs. If WebRTC can't connect
 on your network (a VPN in TUN mode can block every candidate, even between
@@ -183,7 +201,8 @@ src/
   predict.js      client-side whole-world prediction and smoothing
   net.js          PeerJS transport (from the sibling project)
   config.js       signalling, ICE/TURN, tick rates
-  render.js       Three.js: stadium, cars, ball, particles, cameras, bloom
+  render.js       Three.js: stadium, instanced cars and pads, ball, particles, cameras, bloom
+  perf.js         the F3 frame-rate / CPU readout
   input.js        keyboard, gamepad, touch
   audio.js        procedural WebAudio (engine, boost, hits, horn, crowd)
   ui.js           DOM for screens, lobby, HUD and scoreboard
@@ -193,6 +212,7 @@ tools/
   blender/        one script per asset, plus shared helpers
   sim.mjs         headless bot matches
   netsim.mjs      headless prediction-accuracy test
+  bench.mjs       frame-rate / CPU benchmark in headless Chrome
   fakepeer.js     tab-to-tab PeerJS stand-in for testing (?fakenet)
   serve.py        no-cache dev server
 ```

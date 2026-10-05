@@ -64,6 +64,15 @@ export function yawOf(c) {
   }
   return Math.atan2(-f.z, f.x);
 }
+/**
+ * The upright orientation nearest the car's current one: the twist of its
+ * rotation about world up. A back flip that hasn't quite finished lands
+ * facing forward, not snapped round to face where its nose happened to point.
+ */
+function landingYaw(c) {
+  if (c.qy * c.qy + c.qw * c.qw < 0.02) return yawOf(c);   // rolled exactly over: any yaw is as near
+  return 2 * Math.atan2(c.qy, c.qw);
+}
 /** Apply a local-frame angular velocity for dt (q = q * dq). */
 function spinLocal(c, wx, wy, wz, dt) {
   const ang = Math.hypot(wx, wy, wz) * dt;
@@ -85,6 +94,9 @@ function spinLocal(c, wx, wy, wz, dt) {
 // and crossbar) as thin cylinders. Returns the deepest penetration found and
 // leaves its normal in C.
 const C = { nx: 0, ny: 0, nz: 0 };
+// Scratch ball states for World.carsBall.
+const BALL_KEYS = ['x', 'y', 'z', 'vx', 'vy', 'vz', 'wx', 'wy', 'wz'];
+const BALL0 = {}, BALL1 = {}, ACC = {};
 let best = 0;
 function consider(nx, ny, nz, depth) {
   if (depth > best) { best = depth; C.nx = nx; C.ny = ny; C.nz = nz; }
@@ -132,10 +144,15 @@ function arenaContact(o, r, floor) {
 /**
  * Push a sphere out of the arena and bounce it. Resting contact (a slow
  * approach) just cancels the inward speed: bouncing it would make a ball on
- * the floor jitter, and applying friction to it would stop a rolling ball dead.
+ * the floor jitter.
+ *
+ * `mu` > 0 makes it a spinning ball: friction at the contact point trades
+ * travel for spin and back (see ballFriction), so a skidding ball starts to
+ * roll, a rolling one keeps rolling, and backspin bites on the bounce.
+ * Otherwise `fric` is a flat loss of tangential speed per real impact.
  * Returns the hardest impact speed, for sound.
  */
-function collideArena(o, r, floor, e, fric) {
+function collideArena(o, r, floor, e, fric, mu = 0) {
   let impact = 0;
   for (let it = 0; it < 4; it++) {
     const d = arenaContact(o, r, floor);
@@ -144,15 +161,56 @@ function collideArena(o, r, floor, e, fric) {
     const vn = o.vx * C.nx + o.vy * C.ny + o.vz * C.nz;
     if (vn >= 0) continue;
     const tx = o.vx - C.nx * vn, ty = o.vy - C.ny * vn, tz = o.vz - C.nz * vn;
-    if (-vn > 2.5) {
-      impact = Math.max(impact, -vn);
-      const k = 1 - fric;
-      o.vx = tx * k - C.nx * vn * e; o.vy = ty * k - C.ny * vn * e; o.vz = tz * k - C.nz * vn * e;
-    } else {
-      o.vx = tx; o.vy = ty; o.vz = tz;
-    }
+    const bounce = -vn > 2.5;
+    if (bounce) impact = Math.max(impact, -vn);
+    const out = bounce ? -vn * e : 0;
+    const k = bounce && !mu ? 1 - fric : 1;
+    o.vx = tx * k + C.nx * out; o.vy = ty * k + C.ny * out; o.vz = tz * k + C.nz * out;
+    if (mu) ballFriction(o, C.nx, C.ny, C.nz, (out - vn) * B.MASS, mu, 0, 0, 0);
   }
   return impact;
+}
+
+/**
+ * Coulomb friction at a ball's contact point. `n` points from the surface
+ * into the ball, `jn` is the normal impulse just applied, and (sx, sy, sz) is
+ * the surface's own velocity (a car's, or zero for the arena). The impulse
+ * opposes the contact point's slip, capped at mu * jn and at what would make
+ * the ball roll without slipping - never more, or friction would add energy.
+ */
+const INV_I = 1 / (B.INERTIA * B.MASS * B.R * B.R);
+const ROLL_K = 1 / B.MASS + 1 / (B.INERTIA * B.MASS);   // 1/m + R^2/I
+function ballFriction(b, nx, ny, nz, jn, mu, sx, sy, sz) {
+  const rx = -nx * B.R, ry = -ny * B.R, rz = -nz * B.R;   // centre -> contact
+  let cx = b.vx + (b.wy * rz - b.wz * ry) - sx;
+  let cy = b.vy + (b.wz * rx - b.wx * rz) - sy;
+  let cz = b.vz + (b.wx * ry - b.wy * rx) - sz;
+  const cn = cx * nx + cy * ny + cz * nz;
+  cx -= nx * cn; cy -= ny * cn; cz -= nz * cn;
+  const slip = Math.hypot(cx, cy, cz);
+  if (slip < 1e-6 || jn <= 0) return;
+  const jt = Math.min(mu * jn, slip / ROLL_K) / slip;
+  const ix = -cx * jt, iy = -cy * jt, iz = -cz * jt;
+  b.vx += ix / B.MASS; b.vy += iy / B.MASS; b.vz += iz / B.MASS;
+  b.wx += (ry * iz - rz * iy) * INV_I;
+  b.wy += (rz * ix - rx * iz) * INV_I;
+  b.wz += (rx * iy - ry * ix) * INV_I;
+}
+
+/** Closing speed -> punch, linearly between the K.HIT_CURVE points. */
+function hitScale(v) {
+  const pts = K.HIT_CURVE;
+  if (v <= pts[0][0]) return pts[0][1];
+  for (let i = 1; i < pts.length; i++) {
+    const [x1, y1] = pts[i];
+    if (v <= x1) { const [x0, y0] = pts[i - 1]; return y0 + ((y1 - y0) * (v - x0)) / (x1 - x0); }
+  }
+  return pts[pts.length - 1][1];
+}
+
+function capSpeed(o, max) {
+  const sp = Math.hypot(o.vx, o.vy, o.vz);
+  if (sp > max) { const k = max / sp; o.vx *= k; o.vy *= k; o.vz *= k; }
 }
 
 // ------------------------------------------------------------------ helpers
@@ -177,6 +235,7 @@ export function makeCar(id, team, type = 0) {
     wx: 0, wy: 0, wz: 0,         // angular velocity, car-local frame
     boost: K.BOOST_START,
     grounded: true, jumped: false, doubled: false, dodging: false, jumpHeld: false,
+    halfFlip: false,             // a back flip was cancelled: land facing the nose
     jumpT: 0, dodgeT: 0,
     demo: false, respawnT: 0,
     hitCd: 0,                    // seconds until this car may punch the ball again
@@ -204,7 +263,7 @@ export class World {
     this.overtime = false;
     this.lastCall = false;           // clock hit zero: ends when the ball lands
     this.score = [0, 0];
-    this.ball = { x: 0, y: B.R, z: 0, vx: 0, vy: 0, vz: 0, live: true };
+    this.ball = { x: 0, y: B.R, z: 0, vx: 0, vy: 0, vz: 0, wx: 0, wy: 0, wz: 0, live: true };
     this.cars = [];
     this.pads = PADS.map((p) => ({ ...p, t: 0 }));  // t > 0: respawning
     this.events = [];
@@ -231,7 +290,7 @@ export class World {
   /** Reset for a kickoff. Host only: it spends randomness. */
   kickoff() {
     const b = this.ball;
-    b.x = 0; b.y = B.R; b.z = 0; b.vx = b.vy = b.vz = 0; b.live = true;
+    b.x = 0; b.y = B.R; b.z = 0; b.vx = b.vy = b.vz = 0; b.wx = b.wy = b.wz = 0; b.live = true;
     this.touches.length = 0;
     // Both teams draw the same spot indices, so the kickoff is mirror-fair.
     const order = [0, 1, 2, 3, 4];
@@ -265,7 +324,7 @@ export class World {
     c.x = x; c.y = K.RIDE; c.z = z;
     c.vx = c.vy = c.vz = 0; c.wx = c.wy = c.wz = 0;
     setYaw(c, yaw);
-    c.grounded = true; c.jumped = c.doubled = c.dodging = false;
+    c.grounded = true; c.jumped = c.doubled = c.dodging = c.halfFlip = false;
     c.jumpT = c.dodgeT = 0;
     c.demo = false; c.respawnT = 0;
   }
@@ -298,7 +357,7 @@ export class World {
       }
       if (this.ball.live && this.phase !== PHASE.END) {
         this.stepBall(dt);
-        if (!frozen) for (const c of this.cars) if (!c.demo) this.carBall(c);
+        if (!frozen) this.carsBall();
       }
       if (!frozen) this.carCars();
     }
@@ -391,7 +450,15 @@ export class World {
 
       if (c.dodging) {
         c.dodgeT += dt;
-        if (c.dodgeT >= K.DODGE_T) { c.dodging = false; c.wx *= 0.1; c.wz *= 0.1; }
+        // Flip cancel: pulling the stick against a front/back flip stops its
+        // pitch, keeping the burst. A cancelled back flip is a half flip: it
+        // lands facing where the nose points - back the way you came.
+        if (t * c.wz > 0 && Math.abs(t) > 0.3 && c.dodgeT > 0.05) {
+          if (c.wz > 0) c.halfFlip = true;
+          c.wz *= Math.exp(-K.FLIP_CANCEL * dt);
+          if (Math.abs(c.wz) < 1 && Math.abs(c.wx) < 1) c.dodging = false;   // air control is back
+        }
+        if (c.dodging && c.dodgeT >= K.DODGE_T) { c.dodging = false; c.wx *= 0.1; c.wz *= 0.1; }
       } else {
         // Air control: stick pitches and yaws, drift+stick or the roll keys roll.
         let roll = ((inp.b & BTN.ROLL_R) ? 1 : 0) - ((inp.b & BTN.ROLL_L) ? 1 : 0);
@@ -422,10 +489,11 @@ export class World {
       c.y = K.RIDE;
       if (c.vy < 0) c.vy = 0;
       if (!c.grounded) {
-        // Arcade landing: always wheels-down, keeping the heading.
-        setYaw(c, yawOf(c));
+        // Arcade landing: always wheels-down, by the shortest way round -
+        // except after a half flip, which is meant to turn you around.
+        setYaw(c, c.halfFlip ? yawOf(c) : landingYaw(c));
         c.wx = c.wy = c.wz = 0;
-        c.grounded = true; c.jumped = c.doubled = c.dodging = false;
+        c.grounded = true; c.jumped = c.doubled = c.dodging = c.halfFlip = false;
       }
     } else if (c.grounded && c.y > K.RIDE + 0.05) {
       c.grounded = false; c.jumped = false; c.doubled = false; c.jumpT = 0;
@@ -443,29 +511,53 @@ export class World {
       const h = Math.hypot(b.vx, b.vz);
       if (h > 0) { const k = Math.max(0, h - B.ROLL_DECEL * dt) / h; b.vx *= k; b.vz *= k; }
     }
-    const sp = Math.hypot(b.vx, b.vy, b.vz);
-    if (sp > B.MAX_SPEED) { const k = B.MAX_SPEED / sp; b.vx *= k; b.vy *= k; b.vz *= k; }
+    capSpeed(b, B.MAX_SPEED);
+    const sd = 1 - B.SPIN_DRAG * dt;
+    b.wx *= sd; b.wy *= sd; b.wz *= sd;
+    const w = Math.hypot(b.wx, b.wy, b.wz);
+    if (w > B.MAX_SPIN) { const k = B.MAX_SPIN / w; b.wx *= k; b.wy *= k; b.wz *= k; }
     b.x += b.vx * dt; b.y += b.vy * dt; b.z += b.vz * dt;
-    const hit = collideArena(b, B.R, true, B.BOUNCE, B.FRICTION);
+    const hit = collideArena(b, B.R, true, B.BOUNCE, 0, B.MU);
     if (hit > 4) this.emit(EV.BOUNCE, 0, 0, b.x, b.y, b.z, hit);
   }
 
   /**
-   * Oriented box (the car) against a sphere (the ball). Momentum exchange
+   * Every car against the ball, all resolved against the same ball state and
+   * summed. Resolving them one after another would let whoever is first in
+   * the list win every 50/50 - and every kickoff is a 50/50.
+   */
+  carsBall() {
+    const b = this.ball, b0 = BALL0, s = BALL1;
+    for (const k of BALL_KEYS) { b0[k] = b[k]; ACC[k] = 0; }
+    let touched = false;
+    for (const c of this.cars) {
+      if (c.demo) continue;
+      for (const k of BALL_KEYS) s[k] = b0[k];
+      if (!this.carBall(c, s)) continue;
+      touched = true;
+      for (const k of BALL_KEYS) ACC[k] += s[k] - b0[k];
+    }
+    if (!touched) return;
+    for (const k of BALL_KEYS) b[k] += ACC[k];
+    capSpeed(b, B.MAX_SPEED);
+  }
+
+  /**
+   * Oriented box (the car) against a sphere (the ball), applied to `b` - a
+   * scratch copy of the ball. Returns whether they touched. Momentum exchange
    * alone makes hits feel limp, so - like the game this is modelled on - a
    * fresh touch adds a "punch" along the line from the car to the ball, with
    * its vertical part flattened so the ball goes forward rather than up.
    */
-  carBall(c) {
-    const b = this.ball;
+  carBall(c, b) {
     const dx = b.x - c.x, dy = b.y - c.y, dz = b.z - c.z;
-    if (dx * dx + dy * dy + dz * dz > (B.R + 2.2) ** 2) return;
+    if (dx * dx + dy * dy + dz * dz > (B.R + 2.2) ** 2) return false;
     const l = unrotate(c, dx, dy, dz, {});
     const cx = clamp(l.x, -K.HX, K.HX), cy = clamp(l.y, -K.HY, K.HY), cz = clamp(l.z, -K.HZ, K.HZ);
     const p = rotate(c, cx, cy, cz, {});
     let nx = dx - p.x, ny = dy - p.y, nz = dz - p.z;
     let d = Math.hypot(nx, ny, nz);
-    if (d >= B.R) return;
+    if (d >= B.R) return false;
     if (d < 1e-5) {        // centre inside the box: push out along the nose
       const f = rotate(c, 1, 0, 0, {});
       nx = f.x; ny = f.y; nz = f.z; d = 0;
@@ -479,24 +571,37 @@ export class World {
 
     const rvx = b.vx - c.vx, rvy = b.vy - c.vy, rvz = b.vz - c.vz;
     const vn = rvx * nx + rvy * ny + rvz * nz;
-    if (vn >= 0) return;
+    if (vn >= 0) return true;
     const fresh = c.hitCd <= 0;
-    const before = fresh && !this.predict ? this.headingIntoGoal() : -1;
+    const before = fresh && !this.predict ? this.headingIntoGoal(b) : -1;
     const j = (-(1 + K.HIT_E) * vn) / (1 / B.MASS + 1 / K.MASS);
     b.vx += (nx * j) / B.MASS; b.vy += (ny * j) / B.MASS; b.vz += (nz * j) / B.MASS;
     c.vx -= (nx * j) / K.MASS; c.vz -= (nz * j) / K.MASS;
     if (!c.grounded) c.vy -= (ny * j) / K.MASS;
+    // Bodywork scrapes the ball as it pushes it: a glancing touch or a car
+    // driving out from under it puts spin on.
+    ballFriction(b, nx, ny, nz, j, B.MU_CAR, c.vx, c.vy, c.vz);
 
-    if (!fresh) return;
+    if (!fresh) return true;
     c.hitCd = 0.12;
     const close = Math.min(-vn, 46);
+    // Aim like the game this echoes: from the car's centre to the ball,
+    // flattened so it goes forward rather than up, with part of the nose's
+    // direction taken out so hitting off a corner of the bumper angles it.
     let px = dx, py = dy * 0.35, pz = dz;
-    const pl = Math.hypot(px, py, pz) || 1;
+    let pl = Math.hypot(px, py, pz) || 1;
     px /= pl; py /= pl; pz /= pl;
-    const punch = (K.HIT_BASE + close * K.HIT_PUNCH) * (c.dodging ? K.DODGE_HIT : 1);
+    const f = rotate(c, 1, 0, 0, {});
+    const along = (px * f.x + py * f.y + pz * f.z) * K.HIT_FWD;
+    px -= f.x * along; py -= f.y * along; pz -= f.z * along;
+    pl = Math.hypot(px, py, pz) || 1;
+    px /= pl; py /= pl; pz /= pl;
+    const punch = close * hitScale(close) * (c.dodging ? K.DODGE_HIT : 1);
     b.vx += px * punch; b.vy += py * punch; b.vz += pz * punch;
+    capSpeed(b, B.MAX_SPEED);
     this.emit(EV.HIT, c.id, 0, b.x - nx * B.R, b.y - ny * B.R, b.z - nz * B.R, close);
-    if (!this.predict) this.creditTouch(c, before);
+    if (!this.predict) this.creditTouch(c, b, before);
+    return true;
   }
 
   carCars() {
@@ -630,6 +735,7 @@ export class World {
     this.emit(EV.GOAL, team, sc ? sc.id : 255, b.x, b.y, b.z, speed);
     b.live = false;
     b.vx = b.vy = b.vz = 0;
+    b.wx = b.wy = b.wz = 0;
     this.phase = PHASE.GOAL;
     this.phaseT = MATCH.GOAL_PAUSE;
     if (this.overtime || (this.lastCall && this.score[0] !== this.score[1])) {
@@ -650,8 +756,8 @@ export class World {
    * (at -X), 1 = Orange's, -1 = neither. A coarse ballistic trace with floor
    * bounces, good enough to tell a shot from a clearance.
    */
-  headingIntoGoal() {
-    let { x, y, z, vx, vy, vz } = this.ball;
+  headingIntoGoal(ball = this.ball) {
+    let { x, y, z, vx, vy, vz } = ball;
     const dt = 1 / 30;
     for (let i = 0; i < 75; i++) {
       vy -= B.GRAVITY * dt;
@@ -664,15 +770,14 @@ export class World {
     return -1;
   }
 
-  creditTouch(c, before) {
-    const after = this.headingIntoGoal();
+  creditTouch(c, b, before) {
+    const after = this.headingIntoGoal(b);
     const own = c.team;               // index of the goal this car defends
     const theirs = 1 - own;
     c.stats.touches++;
     c.stats.score += 2;
     if (after === theirs && before !== theirs) { c.stats.shots++; c.stats.score += 20; }
     // A save is stopping a real shot, not two cars touching at kickoff.
-    const b = this.ball;
     const nearOwn = Math.abs(b.x - (own === 0 ? -F.L : F.L)) < 30;
     if (before === own && after !== own && nearOwn) { c.stats.saves++; c.stats.score += 50; this.emit(EV.HIT, c.id, 1); }
     this.touches.push({ id: c.id, team: c.team, tick: this.tick });

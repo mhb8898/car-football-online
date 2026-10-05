@@ -132,7 +132,7 @@ select option { background: #121831; }
 .spect { position: absolute; bottom: 90px; left: 50%; transform: translateX(-50%); font-weight: 700; background: rgba(8, 12, 28, 0.7); padding: 6px 14px; border-radius: 8px; color: var(--dim); }
 
 #plates { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
-.plate { position: absolute; transform: translate(-50%, -100%); font-weight: 700; font-size: 14px; white-space: nowrap; padding: 1px 8px; border-radius: 6px; background: rgba(8, 12, 28, 0.55); text-shadow: 0 1px 2px #000; }
+.plate { position: absolute; left: 0; top: 0; will-change: transform; font-weight: 700; font-size: 14px; white-space: nowrap; padding: 1px 8px; border-radius: 6px; background: rgba(8, 12, 28, 0.55); text-shadow: 0 1px 2px #000; }
 .plate.t0 { color: #9cc4ff; } .plate.t1 { color: #ffc28a; }
 .plate .bb { display: block; height: 3px; margin-top: 2px; border-radius: 2px; background: #ffa53a; }
 
@@ -203,3 +203,11 @@ input[type=range] { padding: 0; accent-color: var(--accent); }
   .tag { display: none; }
   .btn.big { padding: 9px 16px; font-size: 16px; }
 }
+
+/* F3 readout: frame rate and where the frame time goes. */
+.perf { position: fixed; top: 8px; left: 8px; z-index: 50; margin: 0; padding: 6px 9px; pointer-events: none;
+  background: rgba(8, 12, 28, 0.78); border: 1px solid var(--line); border-radius: 8px;
+  font: 600 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); white-space: pre; }
+.perf b { color: #fff; }
+.perf .bad { color: #ff8a7a; }
+.perf .ok { color: #ffcf8a; }

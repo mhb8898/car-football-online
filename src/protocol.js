@@ -17,11 +17,12 @@
 export const MSG = { SNAP: 1, INPUT: 2 };
 export const INPUT_REDUNDANCY = 4;   // each input packet repeats the last N inputs
 
-const CAR_FLAGS = ['grounded', 'jumped', 'doubled', 'dodging', 'jumpHeld', 'demo'];
+const CAR_FLAGS = ['grounded', 'jumped', 'doubled', 'dodging', 'jumpHeld', 'demo', 'halfFlip'];
 const CAR_F32 = ['x', 'y', 'z', 'vx', 'vy', 'vz', 'qx', 'qy', 'qz', 'qw', 'wx', 'wy', 'wz',
   'boost', 'jumpT', 'dodgeT', 'respawnT', 'hitCd'];
 const CAR_BYTES = 1 + 1 + 1 + 4 + CAR_F32.length * 4 + 3;
 const EV_BYTES = 3 + 16;
+const BALL_F32 = ['x', 'y', 'z', 'vx', 'vy', 'vz', 'wx', 'wy', 'wz'];
 
 const i8 = (v) => Math.round(Math.max(-1, Math.min(1, v)) * 127);
 
@@ -29,7 +30,7 @@ const i8 = (v) => Math.round(Math.max(-1, Math.min(1, v)) * 127);
 export function encodeSnapshot(w, events) {
   const n = w.cars.length;
   const ev = events.slice(0, 32);
-  const size = 1 + 4 + 1 + 4 + 4 + 2 + 4 + 24 + 1 + n * CAR_BYTES + 1 + ev.length * EV_BYTES;
+  const size = 1 + 4 + 1 + 4 + 4 + 2 + 4 + BALL_F32.length * 4 + 1 + n * CAR_BYTES + 1 + ev.length * EV_BYTES;
   const buf = new ArrayBuffer(size);
   const d = new DataView(buf);
   let o = 0;
@@ -43,7 +44,7 @@ export function encodeSnapshot(w, events) {
   w.pads.forEach((p, i) => { if (p.t <= 0) mask |= 1 << i; });
   d.setUint32(o, mask >>> 0, true); o += 4;
   const b = w.ball;
-  for (const k of ['x', 'y', 'z', 'vx', 'vy', 'vz']) { d.setFloat32(o, b[k], true); o += 4; }
+  for (const k of BALL_F32) { d.setFloat32(o, b[k], true); o += 4; }
   d.setUint8(o, n); o += 1;
   for (const c of w.cars) {
     d.setUint8(o, c.id);
@@ -79,7 +80,7 @@ export function decodeSnapshot(bytes) {
   s.score = [d.getUint8(o), d.getUint8(o + 1)]; o += 2;
   s.padMask = d.getUint32(o, true); o += 4;
   s.ball = {};
-  for (const k of ['x', 'y', 'z', 'vx', 'vy', 'vz']) { s.ball[k] = d.getFloat32(o, true); o += 4; }
+  for (const k of BALL_F32) { s.ball[k] = d.getFloat32(o, true); o += 4; }
   const n = d.getUint8(o); o += 1;
   s.cars = [];
   for (let i = 0; i < n; i++) {

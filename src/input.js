@@ -29,6 +29,7 @@ export class Input {
       if (!this.keys.has(e.code)) this.action(e.code);
       this.keys.add(e.code);
       if (/^(Space|Arrow|Tab)/.test(e.code) && this.enabled) e.preventDefault();
+      if (e.code === 'F3') e.preventDefault();       // the browser's find-next
     });
     addEventListener('keyup', (e) => { this.keys.delete(e.code); });
     addEventListener('blur', () => { this.keys.clear(); this.mouse = 0; });
@@ -38,7 +39,7 @@ export class Input {
   }
 
   action(code) {
-    const map = { KeyB: 'ballcam', Escape: 'menu', Tab: 'scores', KeyM: 'mute' };
+    const map = { KeyB: 'ballcam', Escape: 'menu', Tab: 'scores', KeyM: 'mute', F3: 'perf' };
     if (map[code]) this.onAction?.(map[code]);
   }
 

@@ -10,6 +10,7 @@ const DEFAULTS = {
   volume: 0.8,
   ballCam: true,
   plates: true,
+  perf: false,
   muted: false,
 };
 let cur = { ...DEFAULTS };

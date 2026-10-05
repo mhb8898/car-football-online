@@ -9,7 +9,7 @@
 // changing a field dimension here means rebuilding the arena art too.
 // ---------------------------------------------------------------------------
 
-export const PROTO_VERSION = 3;
+export const PROTO_VERSION = 4;
 export const SIGNAL_PREFIX = 'turbokick-v1-';
 
 export const TEAM = { BLUE: 0, ORANGE: 1 };
@@ -37,7 +37,11 @@ export const BALL = {
   DRAG: 0.03,         // per second, proportional
   MAX_SPEED: 55,
   BOUNCE: 0.62,       // restitution against the arena
-  FRICTION: 0.18,     // fraction of tangential speed lost per real bounce
+  MU: 0.32,           // Coulomb friction against the arena (couples spin and travel)
+  MU_CAR: 0.22,       // ... and against a car's bodywork
+  INERTIA: 0.4,       // I = INERTIA * m * R^2 (solid sphere)
+  SPIN_DRAG: 0.08,    // per second, in the air
+  MAX_SPIN: 30,       // rad/s; about rolling at top speed
   ROLL_DECEL: 1.2,    // m/s^2 while rolling on the floor
   MASS: 1,
 };
@@ -83,9 +87,13 @@ export const CAR = {
   BOOST_START: 34,
 
   HIT_E: 0.55,        // restitution car -> ball
-  HIT_PUNCH: 0.42,    // extra ball speed per m/s of closing speed
-  HIT_BASE: 2.5,
+  // Extra ball speed per m/s of closing speed, by closing speed: strong for a
+  // real hit, tapering for a full-speed smash, and ~0 base so a gentle touch
+  // stays gentle (that's what lets a ball sit on a roof for a dribble).
+  HIT_CURVE: [[0, 0.62], [23, 0.5], [46, 0.42]],
+  HIT_FWD: 0.35,      // how much the nose's direction is taken out of the aim
   DODGE_HIT: 1.35,    // punch multiplier during a flip
+  FLIP_CANCEL: 14,    // how fast stick-against-the-flip stops its rotation
   DEMO_SPEED: 22,     // closing speed an attacker needs to demolish
   RESPAWN_T: 3,
 };
